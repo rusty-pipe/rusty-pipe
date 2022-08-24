@@ -1,0 +1,13 @@
+version: '3.4'
+services:
+  app:
+    build: ./
+    security_opt:
+      - seccomp:unconfined
+    cap_add: ["SYS_PTRACE"]
+    command: "tail -f /dev/null"
+    volumes:
+      - "./:/app"
+      - "~/.kube:/root/.kube"
+      - /var/run/docker.sock:/var/run/docker.sock
+    
