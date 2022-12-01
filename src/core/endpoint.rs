@@ -1,11 +1,73 @@
+
+use bytes::BytesMut;
 use futures::future::join_all;
-use tokio::io::{AsyncWrite, AsyncRead, copy, split};
+use tokio::io::{AsyncWrite, AsyncRead, copy, split, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::{channel, Receiver};
 use tokio::sync::oneshot;
 use tokio::{task, select};
 
 pub trait PipeEndpoint: Send + Unpin {
     fn get_sink_and_source(self: Box<Self>) -> (Box<dyn AsyncRead + Unpin + Send + 'static>, Box<dyn AsyncWrite + Unpin + Send + 'static>);
 }
+
+pub struct PipeCopySource {
+    size: u64,
+    reader: Box<dyn AsyncRead + Send + Unpin>
+}
+
+pub struct PipeCopyDestination {
+    writer: Box<dyn AsyncWrite + Send + Unpin>
+}
+
+impl PipeCopyDestination {
+    pub fn new(writer: Box<dyn AsyncWrite + Send + Unpin>) -> Self {
+        PipeCopyDestination { writer }
+    }
+}
+
+impl PipeCopySource {
+    pub fn new(size: u64, reader: Box<dyn AsyncRead + Send + Unpin>) -> Self {
+        PipeCopySource {size, reader}
+    }
+
+    pub fn get_size(&self) -> u64 {
+        self.size
+    }
+}
+
+
+// Returns message stream with progress
+pub async fn pipe_copy(src: PipeCopySource, dst: PipeCopyDestination) -> Receiver<usize> {
+    let (rx, tx) = channel::<usize>(100);
+    task::spawn(async move {
+        let mut from = src.reader;
+        let mut to = dst.writer;
+        let mut buf = BytesMut::with_capacity(1024*10);
+        loop {
+            buf.clear();
+            match from.read_buf(&mut buf).await {
+                Ok(buf_size) => {
+                    if buf_size == 0 {
+                        break; 
+                    }
+                    match to.write_all(&mut buf).await {
+                        Ok(_) => {},
+                        Err(_) => {
+                            break;
+                        },
+                    };
+                    rx.send(buf_size).await.ok();
+                },
+                Err(_) => {
+                    break;
+                },
+            };
+        }
+    });
+    return tx;
+}
+
+
 
 pub async fn connect(from: Box<dyn PipeEndpoint>, to: Box<dyn PipeEndpoint>) -> u64
 {

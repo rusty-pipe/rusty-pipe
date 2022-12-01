@@ -1,15 +1,12 @@
 use clap::{Parser};
 use core::cli::complete::{Complete, print_completions};
-use core::cli::{Cli, Commands, ls, pf, agent};
+use core::cli::{Cli, Commands, ls, pf, agent, cp};
 use core::endpoint::{docker::DockerEndpoint, kube::KubeConfigs};
 use env_logger::Builder;
 
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-
-    
-    
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         let kube = KubeConfigs::new();
@@ -41,6 +38,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Pf { origin, dst }) => {
             let pf = pf::Pf::new(kube);
             pf.exec(origin, dst).await
+        },
+        Some(Commands::Cp { src, dst }) => {
+            let cp = cp::Cp::new(kube, docker);
+            cp.exec(src, dst).await
         },
         Some(Commands::Agent { listen, port }) => {
             let agent = agent::Agent::new(port, listen);

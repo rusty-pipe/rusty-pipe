@@ -26,6 +26,14 @@ Available forward points are:
     STDIO: '-'
 ";
 
+static COPY_POINT_HELP: &str = 
+"
+Available copy points are:
+    Kubernetes: '<context>/<namespace>/<pod>:<PATH>'
+    Docker: '<container>:<PATH>'
+    Local: '<PATH>'
+";
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Shell {
     Bash
@@ -39,6 +47,17 @@ pub enum Commands {
         /// endpoint string or it's part
         #[clap(value_parser=str_to_ls_path)]
         endpoint: Option<String>
+    },
+
+    /// Copy from ORIGIN to DESTINATION
+    Cp {
+        /// Source
+        #[clap(value_parser=str_to_copy_point, name="ORIGIN", long_help=COPY_POINT_HELP)]
+        src: CopyPoint,
+
+        /// Destination
+        #[clap(value_parser=str_to_copy_point, name="DESTINATION", long_help=COPY_POINT_HELP)]
+        dst: CopyPoint,
     },
     
     /// Port forward from ORIGIN to DESTINATION
@@ -73,6 +92,25 @@ pub enum Commands {
 
 }
 
+#[derive(Debug, Clone)]
+pub enum CopyPoint {
+    Docker(DockerCopyPoint),
+    Kube(KubeCopyPoint),
+    Local(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct KubeCopyPoint {
+    pub context: String,
+    pub namespace: String,
+    pub pod: String,
+    pub path: String
+}
+#[derive(Debug, Clone)]
+pub struct DockerCopyPoint {
+    pub container: String,
+    pub path: String,
+}
 
 #[derive(Debug, Clone)]
 pub enum ForwardPoint {
@@ -154,7 +192,38 @@ fn str_to_forward_point(val: &str) -> Result<ForwardPoint, String> {
     }
 }
 
+
+fn str_to_copy_point(val: &str) -> Result<CopyPoint, String> {
+    
+    if !val.contains(":") {
+        return Ok(CopyPoint::Local(val.to_owned()));
+    }
+    let origin_path: Vec<String> = val.split(":").map(|p| {String::from(p)}).collect();
+    let parts: Vec<String> = origin_path[0].split("/").map(|p| {String::from(p)}).collect();
+    match parts.len() {
+        1 => {
+            let path = origin_path[1].to_owned();
+            return Ok(CopyPoint::Docker(DockerCopyPoint{container: origin_path[0].clone(), path }));
+        },
+        3 => {
+            return Ok(CopyPoint::Kube(
+                KubeCopyPoint {
+                    context: parts[0].clone(),
+                    namespace: parts[1].clone(),
+                    pod: parts[2].clone(),
+                    path: origin_path[1].to_owned(),
+                }
+            ));
+        },
+        _ => {
+            Err("Not a valid copy path".to_string())
+        }
+    }
+}
+
 pub mod ls;
 pub mod pf;
+pub mod cp;
 pub mod agent;
 pub mod complete;
+mod path_parser;

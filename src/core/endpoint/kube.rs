@@ -1,10 +1,10 @@
-use std::{fs::read_dir, collections::HashMap, rc::Rc, process::exit};
+use std::{fs::read_dir, collections::HashMap, rc::Rc, process::exit, str::FromStr, path::Path};
 use home::home_dir;
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{config::{Kubeconfig, KubeConfigOptions, KubeconfigError}, Client, Config, api::{Portforwarder, ListParams, AttachParams}, Api, ResourceExt};
-use tokio::{io::{AsyncRead, AsyncWrite, split, copy, BufReader, AsyncBufReadExt, stderr, AsyncWriteExt}, sync::mpsc::Receiver};
+use tokio::{io::{AsyncRead, AsyncWrite, split, copy, BufReader, AsyncBufReadExt, stderr, AsyncWriteExt, AsyncReadExt}, sync::mpsc::Receiver, select, time::sleep};
 
-use super::{PipeEndpoint, AGENT, AGENT_PATH, AGENT_KILL_PATH};
+use super::{PipeEndpoint, AGENT, AGENT_PATH, AGENT_KILL_PATH, PipeCopySource, PipeCopyDestination};
 use crate::mux::Multiplexer;
 
 // Files holding Kube config
@@ -33,11 +33,12 @@ impl From<KubeconfigError> for Error {
     }
 }
 
-
+#[cfg_attr(test, faux::create)]
 pub struct KubeConfigs {
     contexts: HashMap<String, (Rc<KubeConfigInFile>, String)>,
     default_context: Option<String>
 }
+#[cfg_attr(test, faux::methods)]
 impl KubeConfigs {
     pub fn new() -> Self {
         let kube_dir = format!("{}/.kube", home_dir().unwrap().display());
@@ -79,7 +80,8 @@ impl KubeConfigs {
         }
         KubeConfigs { contexts: contexts, default_context: default_context }
     }
-
+    
+    // -> (context, file)
     pub fn get_contexts(&self) -> Vec<(String, String)> {
         self.contexts.keys().map(|key|{
             let (file, _) =  self.contexts.get(key).unwrap();
@@ -101,13 +103,15 @@ impl KubeConfigs {
         return Ok(list.into_iter().map(|n| {n.name_unchecked()}).collect());
     }
 
-    pub async fn get_pod_files(&self, context: String, ns: String, pod: String, path: String) -> Result<Vec<String>, Error> {
+    pub async fn get_pod_files(&self, context: String, ns: String, pod: String, path: String, mut flags: Vec<String>) -> Result<Vec<String>, Error> {
         let client = self.get_client(context).await?;
         let pods = Api::<Pod>::namespaced(client, ns.as_str());
         let mut params = AttachParams::default();
         params.stdout = true;
+        let mut cmd = vec!["ls".to_owned(), path];
+        cmd.append(&mut flags);
         let mut proc = pods
-            .exec(pod.as_str(), ["ls", "-lah", path.as_str()], &params)
+            .exec(pod.as_str(), cmd, &params)
             .await?;
         let stdout = proc.stdout().ok_or(Error::ExecError("Failed to exec ls".to_string()))?;
         let mut lines = BufReader::new(stdout).lines();
@@ -169,6 +173,112 @@ impl KubeConfigs {
         Ok(PortForwardPipeEndpoint::new(pf, port))
     }
 
+    pub async fn get_copy_source(&self, context: String, ns: String, pod: String, path: String) ->  Result<PipeCopySource, Error> {
+        let client = self.get_client(context).await?;
+        let pods = Api::<Pod>::namespaced(client, &ns);
+        let path_parts = Path::new(path.as_str());
+        let target: &str;
+        let dir: &str;
+        if path.ends_with("/") {
+            target = ".";
+            dir = path.strip_suffix("/").unwrap();
+        } else {
+            target = path_parts.file_name().unwrap().to_str().unwrap();
+            dir = path_parts.parent().unwrap().to_str().unwrap(); 
+        };
+        let mut params = AttachParams::default();
+        params.stderr = true;
+        params.stdin = false;
+        params.stdout = true;
+        let mut proc_size = pods.exec(&pod, [
+            "sh".to_owned(), 
+            "-c".to_owned(), 
+            format!("tar cf - -C {} {} | wc -c", dir, target).to_owned(), 
+        ], &params).await?;
+        
+        let mut stderr_stream = proc_size.stderr().expect("Remote stderr failed");
+        let mut stdout_stream = proc_size.stdout().expect("Remote stdout failed");
+        let mut stdout_buf = vec![];
+        let mut stderr_buf = vec![];
+
+        stderr_stream.read_to_end(&mut stderr_buf).await.or(Err(Error::ExecError("Failed to exec wc".to_owned())))?;
+        let e = std::str::from_utf8(&mut stderr_buf).expect("Failed to parse return");
+        if !e.is_empty() {
+            return Err(Error::ExecError(e.to_owned()));
+        }
+
+        stdout_stream.read_to_end(&mut stdout_buf).await.or(Err(Error::ExecError("Failed to exec wc".to_owned())))?;
+        let mut du_res = String::from_utf8_lossy(&stdout_buf).to_string();
+        du_res.retain(|s| s.is_numeric());
+        let size: u64 = FromStr::from_str(du_res.as_str()).expect("Failed to parse file size");
+        let mut proc_tar = pods.exec(&pod, [
+            "tar".to_owned(), 
+            "cf".to_owned(), 
+            "-".to_owned(), 
+            "-C".to_owned(), 
+            dir.to_owned(),
+            target.to_owned(),
+        ], &params).await?;
+
+        let mut stderr_stream = proc_tar.stderr().expect("Remote stderr failed");
+        let stdout_stream = proc_tar.stdout().expect("Remote stdout failed");
+        
+        // wait for a sec just to see if there is some err
+        select! {
+            _ = sleep(tokio::time::Duration::from_millis(1000)) => {
+                
+            },
+            _ = stderr_stream.read_to_end(&mut stderr_buf) => {
+                let e = std::str::from_utf8(&mut stderr_buf).expect("Failed to parse return");
+                return Err(Error::ExecError(e.to_owned()));
+            }
+        };
+        // prevent process from being dropped
+        tokio::spawn(proc_tar.join());
+
+        Ok(PipeCopySource::new(size, Box::new(stdout_stream)))
+    }
+
+    pub async fn get_copy_destination(&self, context: String, ns: String, pod: String, path: String) -> Result<PipeCopyDestination, Error> {
+        let client = self.get_client(context).await?;
+        let pods = Api::<Pod>::namespaced(client, &ns);
+        let mut params = AttachParams::default();
+        let mut stderr_buf = vec![];
+        params.stderr = true;
+        params.stdin = true;
+        params.stdout = false;
+
+        let mut proc_tar = pods.exec(&pod, [
+            "tar".to_owned(), 
+            "xf".to_owned(), 
+            "-".to_owned(), 
+            "-C".to_owned(), 
+            path.to_owned()
+        ], &params).await?;
+
+        let mut stderr_stream = proc_tar.stderr().expect("Remote stderr failed");
+        let stdin_stream = proc_tar.stdin().expect("Remote stdin failed");
+        
+        // wait for a sec just to see if there is some err
+        select! {
+            _ = sleep(tokio::time::Duration::from_millis(1000)) => {
+                
+            },
+            _ = stderr_stream.read_to_end(&mut stderr_buf) => {
+                let e = std::str::from_utf8(&mut stderr_buf).expect("Failed to parse return");
+                return Err(Error::ExecError(e.to_owned()));
+            }
+        };
+        // prevent process from being dropped
+        tokio::spawn(proc_tar.join());
+        
+        Ok(PipeCopyDestination::new(Box::new(stdin_stream)))
+    }
+
+    
+}
+
+impl KubeConfigs {
     pub async fn get_connections(&self, context: String, ns: String, pod: String, agent: &[String]) -> Result<Receiver<impl AsyncRead + AsyncWrite + Unpin + Send + 'static>, Error> {
         let client = self.get_client(context).await?;
         let pods = Api::<Pod>::namespaced(client, &ns);

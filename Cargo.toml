@@ -24,9 +24,14 @@ log = "0.4.17"
 async-trait = "0.1.57"
 clap = {version="3.2.16", features=["derive"]}
 bollard = "0.13.0"
+indicatif = "0.17.1"
+human_bytes = "0.3.1"
 
 [profile.release]
 strip = true
 opt-level = "z"
 lto = true
+
+[dev-dependencies]
+faux = "0.1.9"
 
