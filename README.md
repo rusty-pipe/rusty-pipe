@@ -4,6 +4,12 @@ Rusty pipe - quick and rusty tool to port forward or reverse port forward betwee
 containers and k8 pods.
 
 This tool can load multiple k8 cluster contexts from `~/.kube/config` and multiple `~/.kube/*.config` files.
+
+## AUTOCOMPLETION
+Autocompletion available for bash shell
+### BASH
+Add `source <(rs completion bash)` to your `.bashrc` file.
+
 ## USAGE:
     rs [OPTIONS] [SUBCOMMAND]
 
