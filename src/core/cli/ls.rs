@@ -1,4 +1,4 @@
-use crate::endpoint::{kube::KubeConfigs, docker::DockerEndpoint};
+use crate::endpoint::{kube::KubeConfigs, docker::DockerEndpoint, stdio::local_ls};
 
 use super::path_parser::{parse_path_types, PathType, Part, K8Path};
 
@@ -26,7 +26,7 @@ impl Ls {
                 let pod: String = pod.into();
                 self.kube.get_pod_files(context, ns, pod, path.clone().expect("Missing path"), flags).await.expect("Kubernetes pod file get failed")
             },
-            PathType::Fs(_) => todo!(),
+            PathType::Fs(path) => local_ls(path).await,
         }
     }
 

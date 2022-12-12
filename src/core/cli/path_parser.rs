@@ -1,4 +1,4 @@
-use crate::endpoint::{docker::DockerEndpoint, kube::KubeConfigs};
+use crate::endpoint::{docker::DockerEndpoint, kube::KubeConfigs, stdio::local_ls};
 
 
 
@@ -188,6 +188,41 @@ impl PathType {
         vec![]
     }
 
+    pub async fn get_local_sugestions(&self) -> Vec<String> {
+        if let PathType::Fs(path) = self {
+            // /path/ | /
+            if path.ends_with("/") {
+                let arr = local_ls(path).await;
+                let maped: Vec<_> = arr.iter().map(|f| {
+                    format!("{}{}", path, f)
+                }).collect();
+                return maped;
+            }
+            // /path/file
+            if path.len() > 1 {
+                let parts: Vec<_> = path.split("/").map(|p| p.to_owned()).collect();
+                if let Some((file, p)) = parts.split_last() {
+                    let mut path = p.join("/");
+                    if path.len() < 1 {
+                        path = "/".to_owned();
+                    } else {
+                        path = format!("{}/", path);
+                    }
+                    let arr = local_ls(&path).await;
+                    let maped: Vec<_> = arr.iter().filter_map(|f| {
+                        if f.starts_with(file) {
+                            Some(format!("{}{}", path, f))
+                        } else {
+                            None
+                        }
+                    }).collect();
+                    return maped;
+                }
+            }
+        }
+        vec![] 
+    }
+
 }
 
 pub fn parse_docker_and_k8_partials(path: &str) -> Vec<PathType> {
@@ -280,7 +315,10 @@ pub async fn get_suggestions(endpoint: Option<String>, docker: &DockerEndpoint, 
                         let mut sug = p.get_k8_suggestions(kube, resolve_fs).await;
                         res.append(&mut sug);
                     },
-                    PathType::Fs(_) => todo!(),
+                    PathType::Fs(_) => {
+                        let mut sug = p.get_local_sugestions().await;
+                        res.append(&mut sug);
+                    },
                 }
             }
             res
@@ -302,7 +340,8 @@ pub async fn get_suggestions(endpoint: Option<String>, docker: &DockerEndpoint, 
 #[cfg(test)]
 mod tests {
     use crate::{endpoint::{kube::KubeConfigs, docker::DockerEndpoint}, cli::path_parser::get_suggestions};
-
+    
+    
     fn get_docker_and_k8() -> (DockerEndpoint, KubeConfigs) {
         let mut kube = KubeConfigs::faux();
         let mut docker = DockerEndpoint::faux();
@@ -459,5 +498,20 @@ mod tests {
         
     }
    
+    // local
+    #[tokio::test]
+    async fn local_dir_completion_works() {
+        let (docker, kube) = get_docker_and_k8();
+        let res = get_suggestions(Some("./".to_owned()), &docker, &kube, true).await;
+        assert!(res.contains(&"./src".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn local_dir_file_works() {
+        let (docker, kube) = get_docker_and_k8();
+        let res = get_suggestions(Some("./s".to_owned()), &docker, &kube, true).await;
+        assert!(res.contains(&"./src".to_owned()));
+    }
+
 
 }

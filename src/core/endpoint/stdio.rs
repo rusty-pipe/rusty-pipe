@@ -48,6 +48,20 @@ pub async fn stdio_to_con(addr: SocketAddr) {
     exit(0);
 }
 
+pub async fn local_ls(path: &str) -> Vec<String> {
+    let com = Command::new("ls")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn().expect("Failed to spawn ls");
+    
+    let mut stdout = com.stdout.expect("Faield to get ls output");
+    let mut buf = String::new();
+    stdout.read_to_string(&mut buf).await.expect("Failed to read ls output");
+    
+    buf.split_whitespace().map(String::from).collect()
+}
+
 pub async fn get_copy_destination(path: String) -> Result<PipeCopyDestination, Error> {
     let os_path = Path::new(path.as_str());
     if !os_path.is_dir() {
